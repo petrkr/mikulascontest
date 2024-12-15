@@ -25,7 +25,7 @@ def main():
     nicholashs = 0
     angels = 0
 
-    special_station = True
+    special_station = False
 
     for qso in qsos_raw:
         print(adif_io.time_on(qso))
@@ -35,13 +35,13 @@ def main():
         points += 10 # 10 points per QSO
         if "COMMENT" in qso and not special_station:
             # Extra points
-            if qso["COMMENT"] in ("Cert"):
+            if qso["COMMENT"].upper() in ("CERT"):
                 points += 10
                 devils += 1
-            elif qso["COMMENT"] in ("Mikulas"):
+            elif qso["COMMENT"].upper() in ("MIKULAS"):
                 points += 20
                 nicholashs += 1
-            elif qso["COMMENT"] in ("Andel"):
+            elif qso["COMMENT"].upper() in ("ANDEL"):
                 points += 40
                 angels += 1
             else:
