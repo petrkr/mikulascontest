@@ -25,13 +25,15 @@ def main():
     nicholashs = 0
     angels = 0
 
+    special_station = True
+
     for qso in qsos_raw:
         print(adif_io.time_on(qso))
         print(qso["CALL"])
         print(qso["GRIDSQUARE"])
 
         points += 10 # 10 points per QSO
-        if "COMMENT" in qso:
+        if "COMMENT" in qso and not special_station:
             # Extra points
             if qso["COMMENT"] in ("Cert"):
                 points += 10
