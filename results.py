@@ -2,6 +2,9 @@ import adif_io
 import sys
 import pathlib
 
+DEVILS_MIN = 2
+NICHOLASHS_MIN = 1
+ANGELS_MIN = 1
 
 def main():
     if len(sys.argv) != 2:
@@ -18,6 +21,9 @@ def main():
     qsos_raw, _ = adif_io.read_from_file(adif_file)
 
     points = 0
+    devils = 0
+    nicholashs = 0
+    angels = 0
 
     for qso in qsos_raw:
         print(adif_io.time_on(qso))
@@ -29,12 +35,19 @@ def main():
             # Extra points
             if qso["COMMENT"] in ("Cert"):
                 points += 10
+                devils += 1
             elif qso["COMMENT"] in ("Mikulas"):
                 points += 20
+                nicholashs += 1
             elif qso["COMMENT"] in ("Andel"):
                 points += 40
+                angels += 1
             else:
                 print("Unknown comment: ", qso["COMMENT"])
+
+    # Extra points
+    if devils >= DEVILS_MIN and nicholashs >= NICHOLASHS_MIN and angels >= ANGELS_MIN:
+        points += 40
 
     print("Total points: ", points)
 
