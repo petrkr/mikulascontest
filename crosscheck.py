@@ -547,17 +547,46 @@ class ContestCrossCheck:
             if len(other_soft_errors) > 20:
                 print(f"\n  ... and {len(other_soft_errors) - 20} more soft errors")
 
-        # Info messages (name differences)
+        # Info messages (name differences) - aggregated by station
         info_results = [r for r in self.results if r.info]
         if info_results:
-            print(f"\nℹ️  INFO - NAME DIFFERENCES ({len(info_results)}):")
-            for result in info_results[:15]:  # Show first 15
-                print(f"\n  {result.qso1.station} <-> {result.qso1.call} @ {result.qso1.time.strftime('%H:%M')}")
-                for info in result.info:
-                    print(f"    ℹ️  {info}")
+            total_info_messages = sum(len(r.info) for r in info_results)
+            print(f"\nℹ️  INFO - NAME DIFFERENCES ({len(info_results)} QSOs, {total_info_messages} differences):")
 
-            if len(info_results) > 15:
-                print(f"\n  ... and {len(info_results) - 15} more name differences")
+            # Group by station
+            by_station = defaultdict(list)
+            for result in info_results:
+                by_station[result.qso1.station].append(result)
+
+            # Show aggregated
+            shown = 0
+            for station in sorted(by_station.keys()):
+                if shown >= 10:  # Limit to 10 stations
+                    remaining_stations = len(by_station) - shown
+                    remaining_diffs = sum(sum(len(r.info) for r in by_station[s]) for s in list(by_station.keys())[shown:])
+                    print(f"\n  ... and {remaining_diffs} more name differences from {remaining_stations} more stations")
+                    break
+
+                results = by_station[station]
+                total_diffs = sum(len(r.info) for r in results)
+                print(f"\n  {station} ({total_diffs} name difference{'s' if total_diffs > 1 else ''}):")
+
+                shown_count = 0
+                for result in results:
+                    if shown_count >= 5:  # Show first 5 differences per station
+                        remaining = total_diffs - shown_count
+                        if remaining > 0:
+                            print(f"    ... and {remaining} more")
+                        break
+
+                    for info in result.info:
+                        if shown_count >= 5:
+                            break
+                        # Extract just the key info from the message
+                        print(f"    {result.qso1.call}: {info.split(':', 1)[1].strip() if ':' in info else info}")
+                        shown_count += 1
+
+                shown += 1
 
     def run(self):
         """Run the complete cross-check process"""
