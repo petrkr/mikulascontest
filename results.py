@@ -64,22 +64,24 @@ def main():
         # Base points for QSO
         qso_points = 10
 
-        if received_identity and not special_station:
-            # Extra points based on identity
-            if received_identity == "CERT":
+        # Count special contacts (for statistics)
+        if received_identity == "CERT":
+            devils += 1
+            if not special_station:
                 qso_points = 20
-                devils += 1
-            elif received_identity == "MIKULAS":
+        elif received_identity == "MIKULAS":
+            nicholashs += 1
+            if not special_station:
                 qso_points = 30
-                nicholashs += 1
-            elif received_identity == "ANDEL":
+        elif received_identity == "ANDEL":
+            angels += 1
+            if not special_station:
                 qso_points = 50
-                angels += 1
-            elif received_identity == "POZEMSTAN":
-                # Normal station, keep base 10 points
-                pass
-            else:
-                print("Unknown identity: ", received_identity)
+        elif received_identity == "POZEMSTAN":
+            # Normal station, keep base 10 points
+            pass
+        elif received_identity:
+            print("Unknown identity: ", received_identity)
 
         points += qso_points
 
@@ -101,9 +103,9 @@ def main():
 
         print(f"{time} {call:10s} {grid:8s} {identity_display:15s} +{qso_points:2d} pts")
 
-    # Bonus points for complete set
+    # Bonus points for complete set (only for normal stations)
     bonus = 0
-    if devils >= DEVILS_MIN and nicholashs >= NICHOLASHS_MIN and angels >= ANGELS_MIN:
+    if not special_station and devils >= DEVILS_MIN and nicholashs >= NICHOLASHS_MIN and angels >= ANGELS_MIN:
         bonus = 40
         points += bonus
 
@@ -114,8 +116,15 @@ def main():
     print(f"Nicholas contacted:  {nicholashs}")
     print(f"Devils contacted:    {devils}")
     print(f"Total QSOs:          {len(qsos_raw)}")
-    if bonus > 0:
-        print(f"\nBonus (complete set): +{bonus} points")
+
+    if not special_station:
+        if bonus > 0:
+            print(f"\nBonus (complete set): +{bonus} points")
+        elif devils >= DEVILS_MIN and nicholashs >= NICHOLASHS_MIN and angels >= ANGELS_MIN:
+            print(f"\nBonus eligible: Complete set achieved!")
+    else:
+        print(f"\nNote: Special stations get 10 points per QSO (no bonuses)")
+
     print(f"\nTOTAL POINTS:        {points}")
     print("="*50)
 
