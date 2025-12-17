@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List, Set, Tuple
 
-# Time tolerance for QSO matching (in minutes)
-TIME_TOLERANCE_MINUTES = 5
+# Time tolerance for validation (in minutes)
+TIME_VALIDATION_TOLERANCE_MINUTES = 5
 
 class QSORecord:
     """Represents a single QSO with all relevant fields"""
@@ -112,26 +112,21 @@ class ContestCrossCheck:
 
         print(f"\nLoaded {len(self.stations)} station logs with {len(self.all_qsos)} total QSOs")
 
-    def find_matching_qso(self, qso: QSORecord) -> QSORecord:
-        """Find the matching QSO from the other station's log"""
+    def find_matching_qsos(self, qso: QSORecord) -> List[QSORecord]:
+        """Find all matching QSOs from the other station's log (by callsign only)"""
         # Look for log from the station we contacted
         if qso.call not in self.stations:
-            return None
+            return []
 
         other_qsos = self.stations[qso.call]
-        time_tolerance = timedelta(minutes=TIME_TOLERANCE_MINUTES)
 
-        # Find QSO with matching callsign and time
+        # Find all QSOs with matching callsign (A->B matches B->A)
+        matches = []
         for other_qso in other_qsos:
-            if other_qso.call != qso.station:
-                continue
+            if other_qso.call == qso.station:
+                matches.append(other_qso)
 
-            # Check time difference
-            time_diff = abs(qso.time - other_qso.time)
-            if time_diff <= time_tolerance:
-                return other_qso
-
-        return None
+        return matches
 
     def validate_qso_pair(self, qso: QSORecord, match: QSORecord) -> CrossCheckResult:
         """Validate a matched QSO pair"""
@@ -139,7 +134,27 @@ class ContestCrossCheck:
 
         # HARD CHECKS
 
-        # Check identity consistency (what I received should match what they sent)
+        # 1. Check time difference
+        time_diff = abs(qso.time - match.time)
+        time_diff_minutes = time_diff.total_seconds() / 60
+
+        if time_diff_minutes > TIME_VALIDATION_TOLERANCE_MINUTES:
+            # Check if it's likely a timezone error (UTC vs CET = 60 minutes)
+            if 55 <= time_diff_minutes <= 65:
+                result.add_hard_error(
+                    f"Timezone error (UTC/CET): {int(time_diff_minutes)} min difference "
+                    f"({qso.station} at {qso.time.strftime('%H:%M')}, "
+                    f"{match.station} at {match.time.strftime('%H:%M')})"
+                )
+            else:
+                result.add_hard_error(
+                    f"Time difference too large: {int(time_diff_minutes)} min "
+                    f"(max {TIME_VALIDATION_TOLERANCE_MINUTES} min allowed) "
+                    f"({qso.station} at {qso.time.strftime('%H:%M')}, "
+                    f"{match.station} at {match.time.strftime('%H:%M')})"
+                )
+
+        # 2. Check identity consistency (what I received should match what they sent)
         if qso.srx_string and match.stx_string:
             if qso.srx_string != match.stx_string:
                 result.add_hard_error(
@@ -198,15 +213,6 @@ class ContestCrossCheck:
                     f"but {qso.station} sent '{qso.my_operator}'"
                 )
 
-        # WARNINGS
-
-        # Check time difference
-        time_diff = abs(qso.time - match.time)
-        if time_diff.total_seconds() > 60:
-            result.add_warning(
-                f"Time difference: {int(time_diff.total_seconds())} seconds"
-            )
-
         return result
 
     def cross_check_all(self):
@@ -218,21 +224,66 @@ class ContestCrossCheck:
         # Count how many stations confirmed each callsign
         callsign_confirmations = defaultdict(set)
 
+        # Track which QSOs between each station pair
+        # Key: (station1, station2), Value: list of QSOs from each
+        pair_qsos = defaultdict(lambda: defaultdict(list))
+
         for station_call, qsos in self.stations.items():
             for qso in qsos:
-                match = self.find_matching_qso(qso)
-
                 # Track which stations contacted this callsign
                 callsign_confirmations[qso.call].add(station_call)
 
-                if match:
-                    result = self.validate_qso_pair(qso, match)
-                else:
-                    result = CrossCheckResult(qso, None)
+                # Group QSOs by pair
+                pair_key = tuple(sorted([station_call, qso.call]))
+                pair_qsos[pair_key][station_call].append(qso)
+
+        # Now process each station pair
+        for pair_key, qsos_by_station in pair_qsos.items():
+            station1, station2 = pair_key
+
+            # Get QSOs from each station
+            qsos_from_1 = sorted(qsos_by_station.get(station1, []), key=lambda q: q.time)
+            qsos_from_2 = sorted(qsos_by_station.get(station2, []), key=lambda q: q.time)
+
+            # Pair them up
+            num_pairs = min(len(qsos_from_1), len(qsos_from_2))
+
+            # Validate paired QSOs
+            for i in range(num_pairs):
+                result = self.validate_qso_pair(qsos_from_1[i], qsos_from_2[i])
+                self.results.append(result)
+
+            # Handle unpaired QSOs from station1
+            for i in range(num_pairs, len(qsos_from_1)):
+                qso = qsos_from_1[i]
+                result = CrossCheckResult(qso, None)
+
+                if i == 0:
+                    # First QSO, no match found at all
                     if qso.call not in self.stations:
                         result.add_warning(f"No log submitted by {qso.call}")
                     else:
                         result.add_hard_error(f"QSO not found in {qso.call}'s log")
+                else:
+                    # Duplicate QSO
+                    result.add_soft_error(f"Duplicate QSO with {qso.call} (not allowed)")
+
+                self.results.append(result)
+
+            # Handle unpaired QSOs from station2
+            for i in range(num_pairs, len(qsos_from_2)):
+                qso = qsos_from_2[i]
+                result = CrossCheckResult(qso, None)
+
+                if i == 0:
+                    # First QSO, no match found at all
+                    if qso.call not in self.stations:
+                        result.add_warning(f"No log submitted by {qso.call}")
+                    else:
+                        result.add_hard_error(f"QSO not found in {qso.call}'s log")
+                else:
+                    # Duplicate QSO
+                    result.add_soft_error(f"Duplicate QSO with {qso.call} (not allowed)")
 
                 self.results.append(result)
 
@@ -323,17 +374,60 @@ class ContestCrossCheck:
         print("DETAILED ERRORS")
         print(f"{'='*70}")
 
-        # Hard errors
-        hard_error_results = [r for r in self.results if r.hard_errors]
-        if hard_error_results:
-            print(f"\n🔴 HARD ERRORS ({len(hard_error_results)}):")
-            for result in hard_error_results[:20]:  # Show first 20
-                print(f"\n  {result.qso1.station} -> {result.qso1.call} @ {result.qso1.time.strftime('%H:%M')}")
-                for error in result.hard_errors:
-                    print(f"    ✗ {error}")
+        # Categorize hard errors
+        timezone_errors = []
+        time_errors = []
+        identity_errors = []
+        missing_qso_errors = []
 
-            if len(hard_error_results) > 20:
-                print(f"\n  ... and {len(hard_error_results) - 20} more hard errors")
+        for result in self.results:
+            if result.hard_errors:
+                for error in result.hard_errors:
+                    if "Timezone error" in error:
+                        timezone_errors.append((result, error))
+                    elif "Time difference" in error:
+                        time_errors.append((result, error))
+                    elif "Identity mismatch" in error:
+                        identity_errors.append((result, error))
+                    elif "QSO not found" in error:
+                        missing_qso_errors.append((result, error))
+
+        # Show timezone errors
+        if timezone_errors:
+            print(f"\n🔴 TIMEZONE ERRORS (UTC/CET) ({len(timezone_errors)}):")
+            print("These logs likely used different time zones (UTC vs CET)")
+            for result, error in timezone_errors[:10]:
+                print(f"\n  {result.qso1.station} -> {result.qso1.call}")
+                print(f"    ✗ {error}")
+            if len(timezone_errors) > 10:
+                print(f"\n  ... and {len(timezone_errors) - 10} more timezone errors")
+
+        # Show time errors
+        if time_errors:
+            print(f"\n🔴 TIME ERRORS ({len(time_errors)}):")
+            for result, error in time_errors[:10]:
+                print(f"\n  {result.qso1.station} -> {result.qso1.call}")
+                print(f"    ✗ {error}")
+            if len(time_errors) > 10:
+                print(f"\n  ... and {len(time_errors) - 10} more time errors")
+
+        # Show identity errors
+        if identity_errors:
+            print(f"\n🔴 IDENTITY ERRORS ({len(identity_errors)}):")
+            for result, error in identity_errors[:10]:
+                print(f"\n  {result.qso1.station} -> {result.qso1.call} @ {result.qso1.time.strftime('%H:%M')}")
+                print(f"    ✗ {error}")
+            if len(identity_errors) > 10:
+                print(f"\n  ... and {len(identity_errors) - 10} more identity errors")
+
+        # Show missing QSO errors
+        if missing_qso_errors:
+            print(f"\n🔴 MISSING QSOs ({len(missing_qso_errors)}):")
+            for result, error in missing_qso_errors[:10]:
+                print(f"\n  {result.qso1.station} -> {result.qso1.call} @ {result.qso1.time.strftime('%H:%M')}")
+                print(f"    ✗ {error}")
+            if len(missing_qso_errors) > 10:
+                print(f"\n  ... and {len(missing_qso_errors) - 10} more missing QSOs")
 
         # Soft errors
         soft_error_results = [r for r in self.results if r.soft_errors]
