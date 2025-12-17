@@ -437,17 +437,64 @@ class ContestCrossCheck:
             if len(missing_qso_errors) > 10:
                 print(f"\n  ... and {len(missing_qso_errors) - 10} more missing QSOs")
 
-        # Soft errors
-        soft_error_results = [r for r in self.results if r.soft_errors]
-        if soft_error_results:
-            print(f"\n🟡 SOFT ERRORS ({len(soft_error_results)}):")
-            for result in soft_error_results[:20]:  # Show first 20
+        # Soft errors - separate duplicates from other errors
+        duplicate_results = []
+        other_soft_errors = []
+
+        for result in self.results:
+            if result.soft_errors:
+                has_duplicate = any("Duplicate QSO" in err for err in result.soft_errors)
+                if has_duplicate:
+                    duplicate_results.append(result)
+                else:
+                    other_soft_errors.append(result)
+
+        # Show duplicates first with detailed info
+        if duplicate_results:
+            print(f"\n🟡 DUPLICATE QSOs ({len(duplicate_results)}):")
+            print("Multiple QSOs between same stations (only first one is valid)")
+
+            # Group duplicates by station pair
+            duplicate_pairs = defaultdict(list)
+            for result in duplicate_results:
+                pair_key = tuple(sorted([result.qso1.station, result.qso1.call]))
+                duplicate_pairs[pair_key].append(result)
+
+            for pair_key, dup_list in sorted(duplicate_pairs.items()):
+                station1, station2 = pair_key
+                print(f"\n  === {station1} <-> {station2} ===")
+
+                # Get all QSOs between this pair (including the valid one)
+                all_qsos_pair = []
+                for res in self.results:
+                    qso_pair = tuple(sorted([res.qso1.station, res.qso1.call]))
+                    if qso_pair == pair_key:
+                        all_qsos_pair.append(res)
+
+                # Sort by time and show all
+                all_qsos_pair.sort(key=lambda r: r.qso1.time)
+                for i, res in enumerate(all_qsos_pair):
+                    status = "✓ VALID" if i == 0 else "✗ DUPLICATE"
+                    qso = res.qso1
+                    match_info = ""
+                    if res.qso2:
+                        match_info = f" <-> {res.qso2.station} @ {res.qso2.time.strftime('%H:%M')}"
+                    else:
+                        match_info = " (no match in their log)"
+
+                    print(f"    {status}: {qso.station} @ {qso.time.strftime('%H:%M')}{match_info}")
+                    print(f"           Grid: {qso.their_gridsquare}, Name: {qso.their_name}, Identity: {qso.srx_string or 'N/A'}")
+
+        # Show other soft errors
+        if other_soft_errors:
+            print(f"\n🟡 OTHER SOFT ERRORS ({len(other_soft_errors)}):")
+            for result in other_soft_errors[:20]:
                 print(f"\n  {result.qso1.station} -> {result.qso1.call} @ {result.qso1.time.strftime('%H:%M')}")
                 for error in result.soft_errors:
                     print(f"    ⚠ {error}")
 
-            if len(soft_error_results) > 20:
-                print(f"\n  ... and {len(soft_error_results) - 20} more soft errors")
+            if len(other_soft_errors) > 20:
+                print(f"\n  ... and {len(other_soft_errors) - 20} more soft errors")
 
         # Info messages (name differences)
         info_results = [r for r in self.results if r.info]
