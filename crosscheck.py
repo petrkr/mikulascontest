@@ -365,10 +365,13 @@ class ContestCrossCheck:
 
             if unconfirmed_missing:
                 print(f"\n⚠ Not confirmed by 2+ stations ({len(unconfirmed_missing)}):")
+
+                # Show each station with list of who confirmed them
                 for call in sorted(unconfirmed_missing):
                     confirming = [s for s in self.stations.keys()
                                  if any(qso.call == call for qso in self.stations[s])]
-                    print(f"  {call} - only confirmed by {len(confirming)} station(s)")
+                    confirming_str = ", ".join(sorted(confirming))
+                    print(f"  {call} - confirmed by: {confirming_str}")
         else:
             print("All contacted stations submitted logs!")
 
