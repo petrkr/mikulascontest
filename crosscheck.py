@@ -50,6 +50,7 @@ class CrossCheckResult:
         self.hard_errors = []
         self.soft_errors = []
         self.warnings = []
+        self.info = []  # Informational messages (like name differences)
 
     def add_hard_error(self, message: str):
         self.hard_errors.append(message)
@@ -59,6 +60,9 @@ class CrossCheckResult:
 
     def add_warning(self, message: str):
         self.warnings.append(message)
+
+    def add_info(self, message: str):
+        self.info.append(message)
 
     def is_valid(self) -> bool:
         """QSO is valid if it has no hard errors"""
@@ -196,20 +200,20 @@ class ContestCrossCheck:
                     f"but {qso.station} sent '{qso.my_gridsquare}'"
                 )
 
-        # Check name consistency
+        # INFO - Name differences (informational only, not counted as errors)
         # What station A received as NAME should match what station B sent as OPERATOR
         if qso.their_name and match.my_operator:
             if qso.their_name != match.my_operator:
-                result.add_soft_error(
-                    f"Name mismatch: {qso.station} received '{qso.their_name}' from {match.station} "
+                result.add_info(
+                    f"Name difference: {qso.station} received '{qso.their_name}' from {match.station} "
                     f"but {match.station} sent '{match.my_operator}'"
                 )
 
         # Check reverse name consistency
         if match.their_name and qso.my_operator:
             if match.their_name != qso.my_operator:
-                result.add_soft_error(
-                    f"Name mismatch: {match.station} received '{match.their_name}' from {qso.station} "
+                result.add_info(
+                    f"Name difference: {match.station} received '{match.their_name}' from {qso.station} "
                     f"but {qso.station} sent '{qso.my_operator}'"
                 )
 
@@ -314,6 +318,7 @@ class ContestCrossCheck:
         hard_errors = sum(1 for r in self.results if r.hard_errors)
         soft_errors = sum(1 for r in self.results if r.soft_errors)
         warnings = sum(1 for r in self.results if r.warnings)
+        info_messages = sum(1 for r in self.results if r.info)
 
         print(f"\nTotal QSOs:          {total_qsos}")
         print(f"Matched QSOs:        {matched_qsos} ({matched_qsos*100//total_qsos if total_qsos > 0 else 0}%)")
@@ -321,6 +326,7 @@ class ContestCrossCheck:
         print(f"Hard errors:         {hard_errors}")
         print(f"Soft errors:         {soft_errors}")
         print(f"Warnings:            {warnings}")
+        print(f"Info (name diffs):   {info_messages}")
 
         # Missing logs
         print(f"\n{'='*70}")
@@ -352,7 +358,7 @@ class ContestCrossCheck:
         print("ERRORS BY STATION")
         print(f"{'='*70}")
 
-        station_errors = defaultdict(lambda: {"hard": 0, "soft": 0, "warnings": 0})
+        station_errors = defaultdict(lambda: {"hard": 0, "soft": 0, "warnings": 0, "info": 0})
 
         for result in self.results:
             station = result.qso1.station
@@ -362,12 +368,14 @@ class ContestCrossCheck:
                 station_errors[station]["soft"] += len(result.soft_errors)
             if result.warnings:
                 station_errors[station]["warnings"] += len(result.warnings)
+            if result.info:
+                station_errors[station]["info"] += len(result.info)
 
-        print(f"\n{'Station':<15s} {'Hard':<8s} {'Soft':<8s} {'Warnings':<10s}")
+        print(f"\n{'Station':<15s} {'Hard':<8s} {'Soft':<8s} {'Warnings':<10s} {'Info':<8s}")
         print("-"*70)
         for station in sorted(station_errors.keys()):
             errors = station_errors[station]
-            print(f"{station:<15s} {errors['hard']:<8d} {errors['soft']:<8d} {errors['warnings']:<10d}")
+            print(f"{station:<15s} {errors['hard']:<8d} {errors['soft']:<8d} {errors['warnings']:<10d} {errors['info']:<8d}")
 
         # Detailed errors
         print(f"\n{'='*70}")
@@ -440,6 +448,18 @@ class ContestCrossCheck:
 
             if len(soft_error_results) > 20:
                 print(f"\n  ... and {len(soft_error_results) - 20} more soft errors")
+
+        # Info messages (name differences)
+        info_results = [r for r in self.results if r.info]
+        if info_results:
+            print(f"\nℹ️  INFO - NAME DIFFERENCES ({len(info_results)}):")
+            for result in info_results[:15]:  # Show first 15
+                print(f"\n  {result.qso1.station} <-> {result.qso1.call} @ {result.qso1.time.strftime('%H:%M')}")
+                for info in result.info:
+                    print(f"    ℹ️  {info}")
+
+            if len(info_results) > 15:
+                print(f"\n  ... and {len(info_results) - 15} more name differences")
 
     def run(self):
         """Run the complete cross-check process"""
