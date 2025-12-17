@@ -450,14 +450,35 @@ class ContestCrossCheck:
             if len(identity_errors) > 10:
                 print(f"\n  ... and {len(identity_errors) - 10} more identity errors")
 
-        # Show missing QSO errors
+        # Show missing QSO errors - aggregated by station
         if missing_qso_errors:
             print(f"\n🔴 MISSING QSOs ({len(missing_qso_errors)}):")
-            for result, error in missing_qso_errors[:10]:
-                print(f"\n  {result.qso1.station} -> {result.qso1.call} @ {result.qso1.time.strftime('%H:%M')}")
-                print(f"    ✗ {error}")
-            if len(missing_qso_errors) > 10:
-                print(f"\n  ... and {len(missing_qso_errors) - 10} more missing QSOs")
+            print("QSOs that station claims but are not in the other station's log")
+
+            # Group by station
+            by_station = defaultdict(list)
+            for result, error in missing_qso_errors:
+                by_station[result.qso1.station].append((result, error))
+
+            # Show aggregated
+            shown = 0
+            for station in sorted(by_station.keys()):
+                if shown >= 15:  # Limit to 15 stations
+                    remaining_stations = len(by_station) - shown
+                    remaining_qsos = sum(len(by_station[s]) for s in list(by_station.keys())[shown:])
+                    print(f"\n  ... and {remaining_qsos} more missing QSOs from {remaining_stations} more stations")
+                    break
+
+                errors = by_station[station]
+                print(f"\n  {station} ({len(errors)} missing QSO{'s' if len(errors) > 1 else ''}):")
+
+                for result, error in errors[:5]:  # Show first 5 per station
+                    print(f"    -> {result.qso1.call} @ {result.qso1.time.strftime('%H:%M')}")
+
+                if len(errors) > 5:
+                    print(f"    ... and {len(errors) - 5} more")
+
+                shown += 1
 
         # Soft errors - separate duplicates from other errors
         duplicate_results = []
