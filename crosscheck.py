@@ -179,9 +179,20 @@ class ContestCrossCheck:
         # Check grid square consistency
         # What station A received as GRIDSQUARE should match what station B sent as MY_GRIDSQUARE
         if qso.their_gridsquare and match.my_gridsquare:
-            # Compare at least 4 characters (some logs may have 6-char locators)
-            qso_grid = qso.their_gridsquare[:4] if len(qso.their_gridsquare) >= 4 else qso.their_gridsquare
-            match_grid = match.my_gridsquare[:4] if len(match.my_gridsquare) >= 4 else match.my_gridsquare
+            # Normalize grids: if both have 6 chars, compare all 6; otherwise compare first 4
+            qso_grid = qso.their_gridsquare
+            match_grid = match.my_gridsquare
+
+            # If lengths differ, truncate to shortest
+            min_len = min(len(qso_grid), len(match_grid))
+            if min_len >= 6:
+                # Both have 6+ chars, compare all 6
+                qso_grid = qso_grid[:6]
+                match_grid = match_grid[:6]
+            elif min_len >= 4:
+                # At least 4 chars, compare first 4
+                qso_grid = qso_grid[:4]
+                match_grid = match_grid[:4]
 
             if qso_grid != match_grid:
                 result.add_soft_error(
@@ -191,8 +202,16 @@ class ContestCrossCheck:
 
         # Check reverse grid consistency
         if match.their_gridsquare and qso.my_gridsquare:
-            qso_grid = qso.my_gridsquare[:4] if len(qso.my_gridsquare) >= 4 else qso.my_gridsquare
-            match_grid = match.their_gridsquare[:4] if len(match.their_gridsquare) >= 4 else match.their_gridsquare
+            qso_grid = qso.my_gridsquare
+            match_grid = match.their_gridsquare
+
+            min_len = min(len(qso_grid), len(match_grid))
+            if min_len >= 6:
+                qso_grid = qso_grid[:6]
+                match_grid = match_grid[:6]
+            elif min_len >= 4:
+                qso_grid = qso_grid[:4]
+                match_grid = match_grid[:4]
 
             if qso_grid != match_grid:
                 result.add_soft_error(
@@ -484,6 +503,14 @@ class ContestCrossCheck:
 
                     print(f"    {status}: {qso.station} @ {qso.time.strftime('%H:%M')}{match_info}")
                     print(f"           Grid: {qso.their_gridsquare}, Name: {qso.their_name}, Identity: {qso.srx_string or 'N/A'}")
+
+                    # Show any errors for this QSO
+                    if res.hard_errors or res.soft_errors:
+                        for err in res.hard_errors:
+                            print(f"           ✗ HARD: {err}")
+                        for err in res.soft_errors:
+                            if "Duplicate" not in err:  # Don't show duplicate error again
+                                print(f"           ⚠ SOFT: {err}")
 
         # Show other soft errors
         if other_soft_errors:
