@@ -1,0 +1,377 @@
+import adif_io
+import sys
+import pathlib
+from datetime import datetime, timedelta
+from collections import defaultdict
+from typing import Dict, List, Set, Tuple
+
+# Time tolerance for QSO matching (in minutes)
+TIME_TOLERANCE_MINUTES = 5
+
+class QSORecord:
+    """Represents a single QSO with all relevant fields"""
+    def __init__(self, station_callsign: str, qso_data: dict):
+        self.station = station_callsign
+        self.call = qso_data.get("CALL", "").upper()
+        self.time = adif_io.time_on(qso_data)
+
+        # Remote station info (what we received from them)
+        self.their_gridsquare = qso_data.get("GRIDSQUARE", "").upper()
+        self.their_name = qso_data.get("NAME", "").upper()
+
+        # Local station info (what we sent)
+        self.my_gridsquare = qso_data.get("MY_GRIDSQUARE", "").upper()
+        self.my_operator = qso_data.get("OPERATOR", "").upper()
+
+        # Get identity from SRX_STRING or COMMENT
+        self.srx_string = None
+        if "SRX_STRING" in qso_data:
+            self.srx_string = qso_data["SRX_STRING"].upper()
+        elif "COMMENT" in qso_data:
+            self.srx_string = qso_data["COMMENT"].upper()
+
+        # Get sent identity
+        self.stx_string = None
+        if "STX_STRING" in qso_data:
+            self.stx_string = qso_data["STX_STRING"].upper()
+
+        self.raw_data = qso_data
+
+    def __repr__(self):
+        return f"QSO({self.station}->{self.call} @ {self.time})"
+
+
+class CrossCheckResult:
+    """Stores validation results for a QSO pair"""
+    def __init__(self, qso1: QSORecord, qso2: QSORecord = None):
+        self.qso1 = qso1
+        self.qso2 = qso2
+        self.matched = qso2 is not None
+        self.hard_errors = []
+        self.soft_errors = []
+        self.warnings = []
+
+    def add_hard_error(self, message: str):
+        self.hard_errors.append(message)
+
+    def add_soft_error(self, message: str):
+        self.soft_errors.append(message)
+
+    def add_warning(self, message: str):
+        self.warnings.append(message)
+
+    def is_valid(self) -> bool:
+        """QSO is valid if it has no hard errors"""
+        return len(self.hard_errors) == 0
+
+
+class ContestCrossCheck:
+    """Main cross-check engine"""
+    def __init__(self, reports_dir: str):
+        self.reports_dir = pathlib.Path(reports_dir)
+        self.stations = {}  # callsign -> list of QSOs
+        self.all_qsos = []  # All QSO records
+        self.results = []  # CrossCheckResults
+        self.missing_logs = set()  # Callsigns without logs
+        self.confirmed_stations = set()  # Stations confirmed by 2+ others
+
+    def load_logs(self):
+        """Load all ADIF files from directory"""
+        print(f"Loading logs from {self.reports_dir}")
+
+        adif_files = list(self.reports_dir.glob("*.adif")) + list(self.reports_dir.glob("*.adi"))
+
+        for adif_file in adif_files:
+            try:
+                qsos_raw, _ = adif_io.read_from_file(str(adif_file))
+
+                if not qsos_raw:
+                    print(f"  ⚠ {adif_file.name}: No QSOs found")
+                    continue
+
+                # Get station callsign from first QSO
+                station_call = qsos_raw[0].get("STATION_CALLSIGN", "UNKNOWN").upper()
+
+                if station_call == "UNKNOWN":
+                    print(f"  ⚠ {adif_file.name}: No station callsign found")
+                    continue
+
+                # Parse QSOs
+                qsos = [QSORecord(station_call, qso) for qso in qsos_raw]
+
+                if station_call in self.stations:
+                    print(f"  ⚠ {adif_file.name}: Duplicate log for {station_call}")
+                    continue
+
+                self.stations[station_call] = qsos
+                self.all_qsos.extend(qsos)
+                print(f"  ✓ {adif_file.name}: {station_call} - {len(qsos)} QSOs")
+
+            except Exception as e:
+                print(f"  ✗ {adif_file.name}: Error - {e}")
+
+        print(f"\nLoaded {len(self.stations)} station logs with {len(self.all_qsos)} total QSOs")
+
+    def find_matching_qso(self, qso: QSORecord) -> QSORecord:
+        """Find the matching QSO from the other station's log"""
+        # Look for log from the station we contacted
+        if qso.call not in self.stations:
+            return None
+
+        other_qsos = self.stations[qso.call]
+        time_tolerance = timedelta(minutes=TIME_TOLERANCE_MINUTES)
+
+        # Find QSO with matching callsign and time
+        for other_qso in other_qsos:
+            if other_qso.call != qso.station:
+                continue
+
+            # Check time difference
+            time_diff = abs(qso.time - other_qso.time)
+            if time_diff <= time_tolerance:
+                return other_qso
+
+        return None
+
+    def validate_qso_pair(self, qso: QSORecord, match: QSORecord) -> CrossCheckResult:
+        """Validate a matched QSO pair"""
+        result = CrossCheckResult(qso, match)
+
+        # HARD CHECKS
+
+        # Check identity consistency (what I received should match what they sent)
+        if qso.srx_string and match.stx_string:
+            if qso.srx_string != match.stx_string:
+                result.add_hard_error(
+                    f"Identity mismatch: {qso.station} received '{qso.srx_string}' "
+                    f"but {match.station} sent '{match.stx_string}'"
+                )
+
+        # Check reverse identity consistency
+        if match.srx_string and qso.stx_string:
+            if match.srx_string != qso.stx_string:
+                result.add_hard_error(
+                    f"Identity mismatch: {match.station} received '{match.srx_string}' "
+                    f"but {qso.station} sent '{qso.stx_string}'"
+                )
+
+        # SOFT CHECKS
+
+        # Check grid square consistency
+        # What station A received as GRIDSQUARE should match what station B sent as MY_GRIDSQUARE
+        if qso.their_gridsquare and match.my_gridsquare:
+            # Compare at least 4 characters (some logs may have 6-char locators)
+            qso_grid = qso.their_gridsquare[:4] if len(qso.their_gridsquare) >= 4 else qso.their_gridsquare
+            match_grid = match.my_gridsquare[:4] if len(match.my_gridsquare) >= 4 else match.my_gridsquare
+
+            if qso_grid != match_grid:
+                result.add_soft_error(
+                    f"Grid mismatch: {qso.station} received '{qso.their_gridsquare}' from {match.station} "
+                    f"but {match.station} sent '{match.my_gridsquare}'"
+                )
+
+        # Check reverse grid consistency
+        if match.their_gridsquare and qso.my_gridsquare:
+            qso_grid = qso.my_gridsquare[:4] if len(qso.my_gridsquare) >= 4 else qso.my_gridsquare
+            match_grid = match.their_gridsquare[:4] if len(match.their_gridsquare) >= 4 else match.their_gridsquare
+
+            if qso_grid != match_grid:
+                result.add_soft_error(
+                    f"Grid mismatch: {match.station} received '{match.their_gridsquare}' from {qso.station} "
+                    f"but {qso.station} sent '{qso.my_gridsquare}'"
+                )
+
+        # Check name consistency
+        # What station A received as NAME should match what station B sent as OPERATOR
+        if qso.their_name and match.my_operator:
+            if qso.their_name != match.my_operator:
+                result.add_soft_error(
+                    f"Name mismatch: {qso.station} received '{qso.their_name}' from {match.station} "
+                    f"but {match.station} sent '{match.my_operator}'"
+                )
+
+        # Check reverse name consistency
+        if match.their_name and qso.my_operator:
+            if match.their_name != qso.my_operator:
+                result.add_soft_error(
+                    f"Name mismatch: {match.station} received '{match.their_name}' from {qso.station} "
+                    f"but {qso.station} sent '{qso.my_operator}'"
+                )
+
+        # WARNINGS
+
+        # Check time difference
+        time_diff = abs(qso.time - match.time)
+        if time_diff.total_seconds() > 60:
+            result.add_warning(
+                f"Time difference: {int(time_diff.total_seconds())} seconds"
+            )
+
+        return result
+
+    def cross_check_all(self):
+        """Perform cross-check on all QSOs"""
+        print("\n" + "="*70)
+        print("CROSS-CHECKING QSOs")
+        print("="*70)
+
+        # Count how many stations confirmed each callsign
+        callsign_confirmations = defaultdict(set)
+
+        for station_call, qsos in self.stations.items():
+            for qso in qsos:
+                match = self.find_matching_qso(qso)
+
+                # Track which stations contacted this callsign
+                callsign_confirmations[qso.call].add(station_call)
+
+                if match:
+                    result = self.validate_qso_pair(qso, match)
+                else:
+                    result = CrossCheckResult(qso, None)
+                    if qso.call not in self.stations:
+                        result.add_warning(f"No log submitted by {qso.call}")
+                    else:
+                        result.add_hard_error(f"QSO not found in {qso.call}'s log")
+
+                self.results.append(result)
+
+        # Identify stations confirmed by 2+ other stations
+        for callsign, confirming_stations in callsign_confirmations.items():
+            if callsign not in self.stations and len(confirming_stations) >= 2:
+                self.confirmed_stations.add(callsign)
+
+        # Identify missing logs (contacted but didn't submit)
+        all_contacted = set()
+        for qso in self.all_qsos:
+            all_contacted.add(qso.call)
+
+        self.missing_logs = all_contacted - set(self.stations.keys())
+
+        print(f"✓ Cross-checked {len(self.results)} QSOs")
+
+    def generate_report(self):
+        """Generate detailed report"""
+        print("\n" + "="*70)
+        print("CROSS-CHECK REPORT")
+        print("="*70)
+
+        # Statistics
+        total_qsos = len(self.results)
+        matched_qsos = sum(1 for r in self.results if r.matched)
+        unmatched_qsos = total_qsos - matched_qsos
+        hard_errors = sum(1 for r in self.results if r.hard_errors)
+        soft_errors = sum(1 for r in self.results if r.soft_errors)
+        warnings = sum(1 for r in self.results if r.warnings)
+
+        print(f"\nTotal QSOs:          {total_qsos}")
+        print(f"Matched QSOs:        {matched_qsos} ({matched_qsos*100//total_qsos if total_qsos > 0 else 0}%)")
+        print(f"Unmatched QSOs:      {unmatched_qsos}")
+        print(f"Hard errors:         {hard_errors}")
+        print(f"Soft errors:         {soft_errors}")
+        print(f"Warnings:            {warnings}")
+
+        # Missing logs
+        print(f"\n{'='*70}")
+        print(f"MISSING LOGS ({len(self.missing_logs)} stations)")
+        print(f"{'='*70}")
+
+        if self.missing_logs:
+            confirmed_missing = self.missing_logs & self.confirmed_stations
+            unconfirmed_missing = self.missing_logs - self.confirmed_stations
+
+            if confirmed_missing:
+                print(f"\n✓ Confirmed by 2+ stations ({len(confirmed_missing)}):")
+                for call in sorted(confirmed_missing):
+                    confirming = [s for s in self.stations.keys()
+                                 if any(qso.call == call for qso in self.stations[s])]
+                    print(f"  {call} - confirmed by {len(confirming)} stations")
+
+            if unconfirmed_missing:
+                print(f"\n⚠ Not confirmed by 2+ stations ({len(unconfirmed_missing)}):")
+                for call in sorted(unconfirmed_missing):
+                    confirming = [s for s in self.stations.keys()
+                                 if any(qso.call == call for qso in self.stations[s])]
+                    print(f"  {call} - only confirmed by {len(confirming)} station(s)")
+        else:
+            print("All contacted stations submitted logs!")
+
+        # Errors by station
+        print(f"\n{'='*70}")
+        print("ERRORS BY STATION")
+        print(f"{'='*70}")
+
+        station_errors = defaultdict(lambda: {"hard": 0, "soft": 0, "warnings": 0})
+
+        for result in self.results:
+            station = result.qso1.station
+            if result.hard_errors:
+                station_errors[station]["hard"] += len(result.hard_errors)
+            if result.soft_errors:
+                station_errors[station]["soft"] += len(result.soft_errors)
+            if result.warnings:
+                station_errors[station]["warnings"] += len(result.warnings)
+
+        print(f"\n{'Station':<15s} {'Hard':<8s} {'Soft':<8s} {'Warnings':<10s}")
+        print("-"*70)
+        for station in sorted(station_errors.keys()):
+            errors = station_errors[station]
+            print(f"{station:<15s} {errors['hard']:<8d} {errors['soft']:<8d} {errors['warnings']:<10d}")
+
+        # Detailed errors
+        print(f"\n{'='*70}")
+        print("DETAILED ERRORS")
+        print(f"{'='*70}")
+
+        # Hard errors
+        hard_error_results = [r for r in self.results if r.hard_errors]
+        if hard_error_results:
+            print(f"\n🔴 HARD ERRORS ({len(hard_error_results)}):")
+            for result in hard_error_results[:20]:  # Show first 20
+                print(f"\n  {result.qso1.station} -> {result.qso1.call} @ {result.qso1.time.strftime('%H:%M')}")
+                for error in result.hard_errors:
+                    print(f"    ✗ {error}")
+
+            if len(hard_error_results) > 20:
+                print(f"\n  ... and {len(hard_error_results) - 20} more hard errors")
+
+        # Soft errors
+        soft_error_results = [r for r in self.results if r.soft_errors]
+        if soft_error_results:
+            print(f"\n🟡 SOFT ERRORS ({len(soft_error_results)}):")
+            for result in soft_error_results[:20]:  # Show first 20
+                print(f"\n  {result.qso1.station} -> {result.qso1.call} @ {result.qso1.time.strftime('%H:%M')}")
+                for error in result.soft_errors:
+                    print(f"    ⚠ {error}")
+
+            if len(soft_error_results) > 20:
+                print(f"\n  ... and {len(soft_error_results) - 20} more soft errors")
+
+    def run(self):
+        """Run the complete cross-check process"""
+        self.load_logs()
+        if not self.stations:
+            print("No logs loaded. Exiting.")
+            return
+
+        self.cross_check_all()
+        self.generate_report()
+
+
+def main():
+    if len(sys.argv) != 2:
+        print("Usage: python crosscheck.py <reports_directory>")
+        sys.exit(1)
+
+    reports_dir = sys.argv[1]
+
+    if not pathlib.Path(reports_dir).is_dir():
+        print(f"Directory not found: {reports_dir}")
+        sys.exit(1)
+
+    checker = ContestCrossCheck(reports_dir)
+    checker.run()
+
+
+if __name__ == "__main__":
+    main()
