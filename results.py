@@ -28,6 +28,7 @@ def main():
     # Determine if this is a special station (CERT/MIKULAS/ANDEL)
     # Special stations send something other than POZEMSTAN in STX_STRING
     special_station = False
+    station_type = "POZEMSTAN"
     if qsos_raw:
         # Check first QSO to determine station type
         first_qso = qsos_raw[0]
@@ -35,12 +36,24 @@ def main():
             sent_identity = first_qso["STX_STRING"].upper()
             if sent_identity in ("CERT", "MIKULAS", "ANDEL"):
                 special_station = True
+                station_type = sent_identity
+
+    # Get station callsign
+    station_callsign = qsos_raw[0].get("STATION_CALLSIGN", "???") if qsos_raw else "???"
+
+    # Print header
+    print("\n" + "="*70)
+    print(f"STATION: {station_callsign}")
+    if special_station:
+        station_icon = {"CERT": "😈", "MIKULAS": "🎅", "ANDEL": "👼"}.get(station_type, "")
+        print(f"TYPE: {station_icon} {station_type} (Special Station - 10 pts per QSO)")
+    else:
+        print(f"TYPE: POZEMSTAN (Normal Station)")
+    print("="*70)
+    print(f"{'TIME'} {'CALLSIGN':<10s} {'GRID':<8s} {'IDENTITY':<15s} {'POINTS'}")
+    print("-"*70)
 
     for qso in qsos_raw:
-        print(adif_io.time_on(qso))
-        print(qso["CALL"])
-        print(qso["GRIDSQUARE"])
-
         # Get received identity from SRX_STRING, fallback to COMMENT
         received_identity = None
         if "SRX_STRING" in qso:
@@ -69,6 +82,24 @@ def main():
                 print("Unknown identity: ", received_identity)
 
         points += qso_points
+
+        # Print QSO details
+        time = adif_io.time_on(qso).strftime("%H:%M")
+        call = qso.get("CALL", "???")
+        grid = qso.get("GRIDSQUARE", "??????")
+        identity_str = received_identity if received_identity else "POZEMSTAN"
+
+        # Format identity with color indicators
+        if received_identity == "ANDEL":
+            identity_display = "👼 ANDEL"
+        elif received_identity == "MIKULAS":
+            identity_display = "🎅 MIKULAS"
+        elif received_identity == "CERT":
+            identity_display = "😈 CERT"
+        else:
+            identity_display = "   POZEMSTAN"
+
+        print(f"{time} {call:10s} {grid:8s} {identity_display:15s} +{qso_points:2d} pts")
 
     # Bonus points for complete set
     bonus = 0
