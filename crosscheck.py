@@ -1,53 +1,18 @@
-import adif_io
 import sys
 import pathlib
 from datetime import datetime, timedelta
 from collections import defaultdict
 from typing import Dict, List, Set, Tuple
 
-# Time tolerance for validation (in minutes)
-TIME_VALIDATION_TOLERANCE_MINUTES = 5
-
-def normalize_callsign(callsign: str) -> str:
-    """Normalize callsign by removing /P and /M suffixes for matching purposes"""
-    callsign = callsign.upper()
-    # Remove /P or /M suffix
-    if callsign.endswith("/P") or callsign.endswith("/M"):
-        return callsign[:-2]
-    return callsign
-
-
-class QSORecord:
-    """Represents a single QSO with all relevant fields"""
-    def __init__(self, station_callsign: str, qso_data: dict):
-        self.station = station_callsign
-        self.call = qso_data.get("CALL", "").upper()
-        self.time = adif_io.time_on(qso_data)
-
-        # Remote station info (what we received from them)
-        self.their_gridsquare = qso_data.get("GRIDSQUARE", "").upper()
-        self.their_name = qso_data.get("NAME", "").upper()
-
-        # Local station info (what we sent)
-        self.my_gridsquare = qso_data.get("MY_GRIDSQUARE", "").upper()
-        self.my_operator = qso_data.get("OPERATOR", "").upper()
-
-        # Get identity from SRX_STRING or COMMENT
-        self.srx_string = None
-        if "SRX_STRING" in qso_data:
-            self.srx_string = qso_data["SRX_STRING"].upper()
-        elif "COMMENT" in qso_data:
-            self.srx_string = qso_data["COMMENT"].upper()
-
-        # Get sent identity
-        self.stx_string = None
-        if "STX_STRING" in qso_data:
-            self.stx_string = qso_data["STX_STRING"].upper()
-
-        self.raw_data = qso_data
-
-    def __repr__(self):
-        return f"QSO({self.station}->{self.call} @ {self.time})"
+# Import shared library
+from contest_lib import (
+    QSORecord,
+    ValidationResult,
+    ErrorType,
+    normalize_callsign,
+    load_adif_file,
+    TIME_VALIDATION_TOLERANCE_MINUTES
+)
 
 
 class CrossCheckResult:
@@ -95,23 +60,9 @@ class ContestCrossCheck:
         adif_files = list(self.reports_dir.glob("*.adif")) + list(self.reports_dir.glob("*.adi"))
 
         for adif_file in adif_files:
-            try:
-                qsos_raw, _ = adif_io.read_from_file(str(adif_file))
+            station_call, qsos = load_adif_file(adif_file)
 
-                if not qsos_raw:
-                    print(f"  ⚠ {adif_file.name}: No QSOs found")
-                    continue
-
-                # Get station callsign from first QSO
-                station_call = qsos_raw[0].get("STATION_CALLSIGN", "UNKNOWN").upper()
-
-                if station_call == "UNKNOWN":
-                    print(f"  ⚠ {adif_file.name}: No station callsign found")
-                    continue
-
-                # Parse QSOs
-                qsos = [QSORecord(station_call, qso) for qso in qsos_raw]
-
+            if station_call and qsos:
                 if station_call in self.stations:
                     print(f"  ⚠ {adif_file.name}: Duplicate log for {station_call}")
                     continue
@@ -119,9 +70,10 @@ class ContestCrossCheck:
                 self.stations[station_call] = qsos
                 self.all_qsos.extend(qsos)
                 print(f"  ✓ {adif_file.name}: {station_call} - {len(qsos)} QSOs")
-
-            except Exception as e:
-                print(f"  ✗ {adif_file.name}: Error - {e}")
+            elif not station_call:
+                print(f"  ⚠ {adif_file.name}: No station callsign found")
+            else:
+                print(f"  ⚠ {adif_file.name}: No QSOs found")
 
         print(f"\nLoaded {len(self.stations)} station logs with {len(self.all_qsos)} total QSOs")
 
@@ -154,6 +106,10 @@ class ContestCrossCheck:
         """Validate a matched QSO pair"""
         result = CrossCheckResult(qso, match)
 
+        # Mark QSO as matched
+        qso.is_matched = True
+        qso.matched_qso = match
+
         # HARD CHECKS
 
         # 1. Check time difference
@@ -163,34 +119,34 @@ class ContestCrossCheck:
         if time_diff_minutes > TIME_VALIDATION_TOLERANCE_MINUTES:
             # Check if it's likely a timezone error (UTC vs CET = 60 minutes)
             if 55 <= time_diff_minutes <= 65:
-                result.add_hard_error(
-                    f"Timezone error (UTC/CET): {int(time_diff_minutes)} min difference "
-                    f"({qso.station} at {qso.time.strftime('%H:%M')}, "
-                    f"{match.station} at {match.time.strftime('%H:%M')})"
-                )
+                msg = (f"Timezone error (UTC/CET): {int(time_diff_minutes)} min difference "
+                       f"({qso.station} at {qso.time.strftime('%H:%M')}, "
+                       f"{match.station} at {match.time.strftime('%H:%M')})")
+                result.add_hard_error(msg)
+                qso.add_validation_error(ErrorType.HARD, msg)
             else:
-                result.add_hard_error(
-                    f"Time difference too large: {int(time_diff_minutes)} min "
-                    f"(max {TIME_VALIDATION_TOLERANCE_MINUTES} min allowed) "
-                    f"({qso.station} at {qso.time.strftime('%H:%M')}, "
-                    f"{match.station} at {match.time.strftime('%H:%M')})"
-                )
+                msg = (f"Time difference too large: {int(time_diff_minutes)} min "
+                       f"(max {TIME_VALIDATION_TOLERANCE_MINUTES} min allowed) "
+                       f"({qso.station} at {qso.time.strftime('%H:%M')}, "
+                       f"{match.station} at {match.time.strftime('%H:%M')})")
+                result.add_hard_error(msg)
+                qso.add_validation_error(ErrorType.HARD, msg)
 
         # 2. Check identity consistency (what I received should match what they sent)
         if qso.srx_string and match.stx_string:
             if qso.srx_string != match.stx_string:
-                result.add_hard_error(
-                    f"Identity mismatch: {qso.station} received '{qso.srx_string}' "
-                    f"but {match.station} sent '{match.stx_string}'"
-                )
+                msg = (f"Identity mismatch: {qso.station} received '{qso.srx_string}' "
+                       f"but {match.station} sent '{match.stx_string}'")
+                result.add_hard_error(msg)
+                qso.add_validation_error(ErrorType.HARD, msg)
 
         # Check reverse identity consistency
         if match.srx_string and qso.stx_string:
             if match.srx_string != qso.stx_string:
-                result.add_hard_error(
-                    f"Identity mismatch: {match.station} received '{match.srx_string}' "
-                    f"but {qso.station} sent '{qso.stx_string}'"
-                )
+                msg = (f"Identity mismatch: {match.station} received '{match.srx_string}' "
+                       f"but {qso.station} sent '{qso.stx_string}'")
+                result.add_hard_error(msg)
+                qso.add_validation_error(ErrorType.HARD, msg)
 
         # SOFT CHECKS
 
@@ -213,10 +169,10 @@ class ContestCrossCheck:
                 match_grid = match_grid[:4]
 
             if qso_grid != match_grid:
-                result.add_soft_error(
-                    f"Grid mismatch: {qso.station} received '{qso.their_gridsquare}' from {match.station} "
-                    f"but {match.station} sent '{match.my_gridsquare}'"
-                )
+                msg = (f"Grid mismatch: {qso.station} received '{qso.their_gridsquare}' from {match.station} "
+                       f"but {match.station} sent '{match.my_gridsquare}'")
+                result.add_soft_error(msg)
+                qso.add_validation_error(ErrorType.SOFT, msg)
 
         # Check reverse grid consistency
         if match.their_gridsquare and qso.my_gridsquare:
@@ -232,10 +188,10 @@ class ContestCrossCheck:
                 match_grid = match_grid[:4]
 
             if qso_grid != match_grid:
-                result.add_soft_error(
-                    f"Grid mismatch: {match.station} received '{match.their_gridsquare}' from {qso.station} "
-                    f"but {qso.station} sent '{qso.my_gridsquare}'"
-                )
+                msg = (f"Grid mismatch: {match.station} received '{match.their_gridsquare}' from {qso.station} "
+                       f"but {qso.station} sent '{qso.my_gridsquare}'")
+                result.add_soft_error(msg)
+                qso.add_validation_error(ErrorType.SOFT, msg)
 
         # INFO - Name differences (informational only, not counted as errors)
         # What station A received as NAME should match what station B sent as OPERATOR
@@ -327,12 +283,22 @@ class ContestCrossCheck:
                     has_log = any(normalize_callsign(s) == normalized_call for s in self.stations.keys())
 
                     if not has_log:
-                        result.add_warning(f"No log submitted by {qso.call}")
+                        # No log submitted - check if confirmed by 2+ stations (will be set later)
+                        msg = f"No log submitted by {qso.call}"
+                        result.add_warning(msg)
+                        qso.add_validation_error(ErrorType.WARNING, msg)
+                        # Will be updated later based on confirmed_stations
                     else:
-                        result.add_hard_error(f"QSO not found in {qso.call}'s log")
+                        # Log exists but QSO not found
+                        msg = f"QSO not found in {qso.call}'s log"
+                        result.add_hard_error(msg)
+                        qso.add_validation_error(ErrorType.HARD, msg)
                 else:
-                    # Duplicate QSO
-                    result.add_soft_error(f"Duplicate QSO with {qso.call} (not allowed)")
+                    # Duplicate QSO - soft error but still not valid for scoring
+                    msg = f"Duplicate QSO with {qso.call} (not allowed)"
+                    result.add_soft_error(msg)
+                    qso.add_validation_error(ErrorType.SOFT, msg)
+                    qso.is_valid_for_scoring = False  # Duplicates don't count
 
                 self.results.append(result)
 
@@ -348,12 +314,22 @@ class ContestCrossCheck:
                     has_log = any(normalize_callsign(s) == normalized_call for s in self.stations.keys())
 
                     if not has_log:
-                        result.add_warning(f"No log submitted by {qso.call}")
+                        # No log submitted - check if confirmed by 2+ stations (will be set later)
+                        msg = f"No log submitted by {qso.call}"
+                        result.add_warning(msg)
+                        qso.add_validation_error(ErrorType.WARNING, msg)
+                        # Will be updated later based on confirmed_stations
                     else:
-                        result.add_hard_error(f"QSO not found in {qso.call}'s log")
+                        # Log exists but QSO not found
+                        msg = f"QSO not found in {qso.call}'s log"
+                        result.add_hard_error(msg)
+                        qso.add_validation_error(ErrorType.HARD, msg)
                 else:
-                    # Duplicate QSO
-                    result.add_soft_error(f"Duplicate QSO with {qso.call} (not allowed)")
+                    # Duplicate QSO - soft error but still not valid for scoring
+                    msg = f"Duplicate QSO with {qso.call} (not allowed)"
+                    result.add_soft_error(msg)
+                    qso.add_validation_error(ErrorType.SOFT, msg)
+                    qso.is_valid_for_scoring = False  # Duplicates don't count
 
                 self.results.append(result)
 
@@ -373,6 +349,30 @@ class ContestCrossCheck:
 
         submitted_normalized = set(normalize_callsign(s) for s in self.stations.keys())
         self.missing_logs = all_contacted_normalized - submitted_normalized
+
+        # Update is_valid_for_scoring for QSOs with missing logs
+        # Based on whether the station is confirmed by 2+ others
+        for qso in self.all_qsos:
+            # Check if QSO has WARNING about missing log
+            has_missing_log_warning = any(
+                err.error_type == ErrorType.WARNING and "No log submitted" in err.message
+                for err in qso.validation_errors
+            )
+
+            if has_missing_log_warning:
+                normalized_call = normalize_callsign(qso.call)
+                # Check if station is confirmed by 2+ others
+                if normalized_call in self.confirmed_stations:
+                    # Station confirmed by 2+ others - QSO is valid
+                    qso.is_valid_for_scoring = True
+                else:
+                    # Station not confirmed - QSO is invalid
+                    qso.is_valid_for_scoring = False
+                    # Upgrade WARNING to HARD error
+                    qso.add_validation_error(
+                        ErrorType.HARD,
+                        f"Station {qso.call} not confirmed by 2+ other stations"
+                    )
 
         print(f"✓ Cross-checked {len(self.results)} QSOs")
 
