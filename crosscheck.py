@@ -8,6 +8,15 @@ from typing import Dict, List, Set, Tuple
 # Time tolerance for validation (in minutes)
 TIME_VALIDATION_TOLERANCE_MINUTES = 5
 
+def normalize_callsign(callsign: str) -> str:
+    """Normalize callsign by removing /P and /M suffixes for matching purposes"""
+    callsign = callsign.upper()
+    # Remove /P or /M suffix
+    if callsign.endswith("/P") or callsign.endswith("/M"):
+        return callsign[:-2]
+    return callsign
+
+
 class QSORecord:
     """Represents a single QSO with all relevant fields"""
     def __init__(self, station_callsign: str, qso_data: dict):
@@ -118,16 +127,25 @@ class ContestCrossCheck:
 
     def find_matching_qsos(self, qso: QSORecord) -> List[QSORecord]:
         """Find all matching QSOs from the other station's log (by callsign only)"""
-        # Look for log from the station we contacted
-        if qso.call not in self.stations:
+        # Normalize callsigns for matching (ignore /P and /M suffixes)
+        normalized_call = normalize_callsign(qso.call)
+        normalized_station = normalize_callsign(qso.station)
+
+        # Find any station with matching normalized callsign
+        other_qsos = None
+        for station_call in self.stations:
+            if normalize_callsign(station_call) == normalized_call:
+                other_qsos = self.stations[station_call]
+                break
+
+        if other_qsos is None:
             return []
 
-        other_qsos = self.stations[qso.call]
-
         # Find all QSOs with matching callsign (A->B matches B->A)
+        # Match using normalized callsigns
         matches = []
         for other_qso in other_qsos:
-            if other_qso.call == qso.station:
+            if normalize_callsign(other_qso.call) == normalized_station:
                 matches.append(other_qso)
 
         return matches
@@ -253,20 +271,41 @@ class ContestCrossCheck:
 
         for station_call, qsos in self.stations.items():
             for qso in qsos:
-                # Track which stations contacted this callsign
-                callsign_confirmations[qso.call].add(station_call)
+                # Track which stations contacted this callsign (use normalized for confirmation)
+                normalized_call = normalize_callsign(qso.call)
+                callsign_confirmations[normalized_call].add(station_call)
 
-                # Group QSOs by pair
-                pair_key = tuple(sorted([station_call, qso.call]))
+                # Group QSOs by pair (use normalized callsigns)
+                normalized_station = normalize_callsign(station_call)
+                pair_key = tuple(sorted([normalized_station, normalized_call]))
                 pair_qsos[pair_key][station_call].append(qso)
 
         # Now process each station pair
         for pair_key, qsos_by_station in pair_qsos.items():
-            station1, station2 = pair_key
+            # pair_key contains normalized callsigns, but qsos_by_station has original callsigns as keys
+            # We need to get all QSOs from both stations in this pair
 
-            # Get QSOs from each station
-            qsos_from_1 = sorted(qsos_by_station.get(station1, []), key=lambda q: q.time)
-            qsos_from_2 = sorted(qsos_by_station.get(station2, []), key=lambda q: q.time)
+            all_qsos_in_pair = []
+            for station_call, station_qsos in qsos_by_station.items():
+                all_qsos_in_pair.extend(station_qsos)
+
+            if len(all_qsos_in_pair) == 0:
+                continue
+
+            # Split QSOs by which station they belong to (use normalized callsigns)
+            qsos_from_1 = []
+            qsos_from_2 = []
+
+            for qso in all_qsos_in_pair:
+                normalized_station = normalize_callsign(qso.station)
+                if normalized_station == pair_key[0]:
+                    qsos_from_1.append(qso)
+                else:
+                    qsos_from_2.append(qso)
+
+            # Sort by time
+            qsos_from_1 = sorted(qsos_from_1, key=lambda q: q.time)
+            qsos_from_2 = sorted(qsos_from_2, key=lambda q: q.time)
 
             # Pair them up
             num_pairs = min(len(qsos_from_1), len(qsos_from_2))
@@ -283,7 +322,11 @@ class ContestCrossCheck:
 
                 if i == 0:
                     # First QSO, no match found at all
-                    if qso.call not in self.stations:
+                    # Check if any station with this normalized callsign submitted a log
+                    normalized_call = normalize_callsign(qso.call)
+                    has_log = any(normalize_callsign(s) == normalized_call for s in self.stations.keys())
+
+                    if not has_log:
                         result.add_warning(f"No log submitted by {qso.call}")
                     else:
                         result.add_hard_error(f"QSO not found in {qso.call}'s log")
@@ -300,7 +343,11 @@ class ContestCrossCheck:
 
                 if i == 0:
                     # First QSO, no match found at all
-                    if qso.call not in self.stations:
+                    # Check if any station with this normalized callsign submitted a log
+                    normalized_call = normalize_callsign(qso.call)
+                    has_log = any(normalize_callsign(s) == normalized_call for s in self.stations.keys())
+
+                    if not has_log:
                         result.add_warning(f"No log submitted by {qso.call}")
                     else:
                         result.add_hard_error(f"QSO not found in {qso.call}'s log")
@@ -311,16 +358,21 @@ class ContestCrossCheck:
                 self.results.append(result)
 
         # Identify stations confirmed by 2+ other stations
+        # Use normalized callsigns to avoid counting OK1PKR and OK1PKR/P as different
         for callsign, confirming_stations in callsign_confirmations.items():
-            if callsign not in self.stations and len(confirming_stations) >= 2:
+            # Check if any station with this normalized callsign submitted a log
+            has_log = any(normalize_callsign(s) == callsign for s in self.stations.keys())
+            if not has_log and len(confirming_stations) >= 2:
                 self.confirmed_stations.add(callsign)
 
         # Identify missing logs (contacted but didn't submit)
-        all_contacted = set()
+        # Use normalized callsigns
+        all_contacted_normalized = set()
         for qso in self.all_qsos:
-            all_contacted.add(qso.call)
+            all_contacted_normalized.add(normalize_callsign(qso.call))
 
-        self.missing_logs = all_contacted - set(self.stations.keys())
+        submitted_normalized = set(normalize_callsign(s) for s in self.stations.keys())
+        self.missing_logs = all_contacted_normalized - submitted_normalized
 
         print(f"✓ Cross-checked {len(self.results)} QSOs")
 
