@@ -123,14 +123,18 @@ class ContestCrossCheck:
                        f"({qso.station} at {qso.time.strftime('%H:%M')}, "
                        f"{match.station} at {match.time.strftime('%H:%M')})")
                 result.add_hard_error(msg)
+                # Časový error je symetrický - obě stanice dostanou error (není jasné kdo má špatně)
                 qso.add_validation_error(ErrorType.HARD, msg)
+                match.add_validation_error(ErrorType.HARD, msg)
             else:
                 msg = (f"Time difference too large: {int(time_diff_minutes)} min "
                        f"(max {TIME_VALIDATION_TOLERANCE_MINUTES} min allowed) "
                        f"({qso.station} at {qso.time.strftime('%H:%M')}, "
                        f"{match.station} at {match.time.strftime('%H:%M')})")
                 result.add_hard_error(msg)
+                # Časový error je symetrický - obě stanice dostanou error (není jasné kdo má špatně)
                 qso.add_validation_error(ErrorType.HARD, msg)
+                match.add_validation_error(ErrorType.HARD, msg)
 
         # 2. Check identity consistency (what I received should match what they sent)
         if qso.srx_string and match.stx_string:
@@ -138,7 +142,9 @@ class ContestCrossCheck:
                 msg = (f"Identity mismatch: {qso.station} received '{qso.srx_string}' "
                        f"but {match.station} sent '{match.stx_string}'")
                 result.add_hard_error(msg)
+                # Nevíme kdo udělal chybu (poslal špatně vs. zapsal špatně) → obě stanice dostanou error
                 qso.add_validation_error(ErrorType.HARD, msg)
+                match.add_validation_error(ErrorType.HARD, msg)
 
         # Check reverse identity consistency
         if match.srx_string and qso.stx_string:
@@ -146,7 +152,9 @@ class ContestCrossCheck:
                 msg = (f"Identity mismatch: {match.station} received '{match.srx_string}' "
                        f"but {qso.station} sent '{qso.stx_string}'")
                 result.add_hard_error(msg)
+                # Nevíme kdo udělal chybu (poslal špatně vs. zapsal špatně) → obě stanice dostanou error
                 qso.add_validation_error(ErrorType.HARD, msg)
+                match.add_validation_error(ErrorType.HARD, msg)
 
         # SOFT CHECKS
 
@@ -172,7 +180,9 @@ class ContestCrossCheck:
                 msg = (f"Grid mismatch: {qso.station} received '{qso.their_gridsquare}' from {match.station} "
                        f"but {match.station} sent '{match.my_gridsquare}'")
                 result.add_soft_error(msg)
+                # Nevíme kdo udělal chybu (poslal špatně vs. zapsal špatně) → obě stanice dostanou error
                 qso.add_validation_error(ErrorType.SOFT, msg)
+                match.add_validation_error(ErrorType.SOFT, msg)
 
         # Check reverse grid consistency
         if match.their_gridsquare and qso.my_gridsquare:
@@ -191,7 +201,9 @@ class ContestCrossCheck:
                 msg = (f"Grid mismatch: {match.station} received '{match.their_gridsquare}' from {qso.station} "
                        f"but {qso.station} sent '{qso.my_gridsquare}'")
                 result.add_soft_error(msg)
+                # Nevíme kdo udělal chybu (poslal špatně vs. zapsal špatně) → obě stanice dostanou error
                 qso.add_validation_error(ErrorType.SOFT, msg)
+                match.add_validation_error(ErrorType.SOFT, msg)
 
         # INFO - Name differences (informational only, not counted as errors)
         # What station A received as NAME should match what station B sent as OPERATOR
